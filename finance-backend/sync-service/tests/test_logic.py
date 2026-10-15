@@ -406,9 +406,10 @@ def test_net_worth_math():
             {"id": "s-loan", "user_id": USER, "type": "loan", "is_active": True},           # liability
         ],
         "separate_account_values": [
-            {"separate_account_id": "s-invest", "amount": 4000},
-            {"separate_account_id": "s-invest", "amount": 1000},   # summed → 5000
-            {"separate_account_id": "s-loan", "amount": 1500},
+            {"user_id": USER, "separate_account_id": "s-invest", "amount": 4000},
+            {"user_id": USER, "separate_account_id": "s-invest", "amount": 1000},   # summed → 5000
+            {"user_id": USER, "separate_account_id": "s-loan", "amount": 1500},
+            {"user_id": "another-user", "separate_account_id": "s-invest", "amount": 999999},
         ],
     })
 

@@ -12,6 +12,7 @@ Every plaid_items row records the plaid_client_id that created it, so sync
 and webhook verification always call Plaid with the right account's
 credentials.
 """
+import hashlib
 import logging
 import os
 
@@ -33,8 +34,7 @@ _ENV_MAP = {
     'production': plaid.Environment.Production,
 }
 
-_clients: dict = {}      # (client_id, env) -> PlaidApi
-_creds_cache: dict = {}  # plaid_client_id -> decrypted creds dict
+_clients: dict = {}      # (client_id, env, secret fingerprint) -> PlaidApi
 
 DEFAULT_ITEM_LIMIT = int(os.environ.get('PLAID_ITEM_LIMIT', '10'))
 
@@ -55,17 +55,20 @@ def house_creds():
     }
 
 
+def new_plaid_client(creds: dict) -> plaid_api.PlaidApi:
+    """Build a client from exactly these credentials, without consulting a cache."""
+    configuration = plaid.Configuration(
+        host=_ENV_MAP[creds['env']],
+        api_key={'clientId': creds['plaid_client_id'], 'secret': creds['secret']},
+    )
+    return plaid_api.PlaidApi(plaid.ApiClient(configuration))
+
+
 def get_plaid_for_creds(creds: dict) -> plaid_api.PlaidApi:
-    key = (creds['plaid_client_id'], creds['env'])
+    fingerprint = hashlib.sha256(creds['secret'].encode()).hexdigest()
+    key = (creds['plaid_client_id'], creds['env'], fingerprint)
     if key not in _clients:
-        configuration = plaid.Configuration(
-            host=_ENV_MAP[creds['env']],
-            api_key={
-                'clientId': creds['plaid_client_id'],
-                'secret': creds['secret'],
-            }
-        )
-        _clients[key] = plaid_api.PlaidApi(plaid.ApiClient(configuration))
+        _clients[key] = new_plaid_client(creds)
     return _clients[key]
 
 
@@ -104,21 +107,23 @@ def credentials_for_user(supabase, user_id: str):
     return load_user_credentials(supabase, user_id) or house_creds()
 
 
-def credentials_for_client_id(supabase, plaid_client_id: str):
-    """Credentials for a specific Plaid developer account. The database wins
-    over the legacy env fallback — after migrating the house account into a
-    plaid_credentials row, the same client_id resolves from the row."""
-    if plaid_client_id not in _creds_cache:
-        rows = supabase.table('plaid_credentials').select('*') \
-            .eq('plaid_client_id', plaid_client_id).eq('is_active', True) \
-            .limit(1).execute().data
-        if not rows:
-            house = house_creds()
-            if house and house['plaid_client_id'] == plaid_client_id:
-                return house
-            return None
-        _creds_cache[plaid_client_id] = _row_to_creds(rows[0])
-    return _creds_cache[plaid_client_id]
+def credentials_for_client_id(supabase, plaid_client_id: str, user_id: str):
+    """Resolve only the item's owner's credentials, then the matching house account.
+
+    Read the row afresh so rotation/deletion is visible to long-running workers.
+    A different user's row with the same client ID must never supply the secret.
+    """
+    if not user_id:
+        return None
+    rows = supabase.table('plaid_credentials').select('*') \
+        .eq('user_id', user_id).eq('plaid_client_id', plaid_client_id) \
+        .eq('is_active', True).limit(1).execute().data
+    if rows:
+        return _row_to_creds(rows[0])
+    house = house_creds()
+    if house and house['plaid_client_id'] == plaid_client_id:
+        return house
+    return None
 
 
 def get_plaid_for_item(supabase, item: dict) -> plaid_api.PlaidApi:
@@ -126,7 +131,7 @@ def get_plaid_for_item(supabase, item: dict) -> plaid_api.PlaidApi:
     client_id = item.get('plaid_client_id')
     if not client_id:
         return get_plaid()
-    creds = credentials_for_client_id(supabase, client_id)
+    creds = credentials_for_client_id(supabase, client_id, item.get('user_id'))
     if creds is None:
         raise RuntimeError(
             f"No active plaid_credentials for client {client_id} "
@@ -164,9 +169,7 @@ def fetch_institution_metadata(plaid_api_client: plaid_api.PlaidApi, institution
 def invalidate_credentials_cache(plaid_client_id: str = None):
     """Call after a plaid_credentials row changes (secret rotated, row deleted)."""
     if plaid_client_id is None:
-        _creds_cache.clear()
         _clients.clear()
         return
-    _creds_cache.pop(plaid_client_id, None)
     for key in [k for k in _clients if k[0] == plaid_client_id]:
         _clients.pop(key)

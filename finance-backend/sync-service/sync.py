@@ -731,6 +731,7 @@ def write_net_worth_snapshot(supabase, user_id):
         # F5: one query for every ledger row, summed in Python.
         vals = supabase.table('separate_account_values') \
             .select('separate_account_id, amount') \
+            .eq('user_id', user_id) \
             .in_('separate_account_id', sep_ids) \
             .execute().data
         sums = {}
@@ -753,8 +754,6 @@ def write_net_worth_snapshot(supabase, user_id):
 
     logger.info('net worth snapshot written', extra={
         'user_id': user_id,
-        'total_assets': round(total_assets, 2),
-        'total_liabilities': round(total_liabilities, 2),
     })
 
 

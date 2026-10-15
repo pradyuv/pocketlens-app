@@ -39,6 +39,7 @@ from plaid_client import (
     house_creds,
     invalidate_credentials_cache,
     load_user_credentials,
+    new_plaid_client,
 )
 from supabase_client import get_supabase, now_iso
 from sync import run_sync, run_sync_for_item
@@ -163,7 +164,7 @@ def delete_account(authorization: str = Header(None)):
     # removes our record of them. Best-effort per item (never blocks deletion).
     try:
         items = supabase.table('plaid_items') \
-            .select('id, plaid_item_id, access_token, plaid_client_id') \
+            .select('id, plaid_item_id, access_token, plaid_client_id, user_id') \
             .eq('user_id', user_id).eq('is_active', True).execute().data or []
     except Exception:
         items = []
@@ -252,14 +253,13 @@ def _extract_plaid_keys(raw: str):
 def _probe(client_id: str, secret: str, env: str):
     """Try a cheap read-only Plaid call with these credentials.
     None on success, else (error_code, display_message)."""
-    client = get_plaid_for_creds({'plaid_client_id': client_id, 'secret': secret, 'env': env})
+    client = new_plaid_client({'plaid_client_id': client_id, 'secret': secret, 'env': env})
     try:
         client.institutions_get(InstitutionsGetRequest(
             count=1, offset=0, country_codes=[CountryCode('US')],
         ))
         return None
     except plaid.ApiException as e:
-        invalidate_credentials_cache(client_id)   # don't cache a client built on bad creds
         try:
             body = json.loads(e.body)
             code = body.get('error_code') or 'UNKNOWN'
@@ -270,10 +270,17 @@ def _probe(client_id: str, secret: str, env: str):
                        extra={'plaid_env': env, 'plaid_error_code': code})
         return code, message
     except Exception:
-        invalidate_credentials_cache(client_id)
         logger.warning('Plaid credential probe failed', exc_info=True,
                        extra={'plaid_env': env})
         return 'UNKNOWN', ''
+    finally:
+        # Probes are deliberately uncached; release their HTTP connection pool.
+        close = getattr(getattr(client, 'api_client', None), 'close', None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                logger.warning('Plaid probe client cleanup failed', exc_info=True)
 
 
 def _credential_error_detail(client_id: str, candidates: list, env: str, err) -> str:
@@ -336,7 +343,6 @@ def save_credentials(payload: dict = Body(...), authorization: str = Header(None
         first_err = first_err or err
     if secret is None:
         detail = _credential_error_detail(client_id, candidates[:3], env, first_err)
-        invalidate_credentials_cache(client_id)
         raise HTTPException(status_code=400, detail=detail)
 
     supabase = get_supabase()
@@ -453,18 +459,14 @@ def link_prepare(authorization: str = Header(None), payload: dict = Body(default
         try:
             link_token = client.link_token_create(LinkTokenCreateRequest(**kwargs)).to_dict()['link_token']
         except Exception:
-            # Plaid rejects the access_token — most likely the secret was
-            # rotated (new team/app under the same client_id). The item is
-            # unrecoverable; invalidate it on Plaid (best-effort) and drop the
-            # row so it stops appearing.
-            logger.warning('Update Mode link_token_create failed — item %s '
-                           'is unrecoverable (secret rotated?)', item_id, exc_info=True)
-            _plaid_item_remove(supabase, {'id': item_id, 'access_token': row['access_token'],
-                                          'plaid_client_id': row['plaid_client_id']})
-            supabase.table('plaid_items').delete().eq('id', item_id).execute()
-            return {'status': 'expired', 'detail': 'This connection can no longer be '
-                    'restored — it may have been invalidated by a Plaid credential '
-                    'change. Please link the bank again as a new connection.'}
+            # A timeout or rejected token is not authorization to unlink a bank.
+            # Preserve the item and its cascading financial records on every failure.
+            logger.warning('Update Mode link_token_create failed',
+                           extra={'item_id': item_id}, exc_info=True)
+            raise HTTPException(status_code=502, detail=(
+                'Unable to reconnect right now. Your connection and history have been '
+                'preserved. Try again later or check your Plaid credentials.'
+            )) from None
         return {'status': 'ok', 'link_token': link_token, 'mode': 'update', 'item_id': item_id}
 
     # ── Normal Mode: fresh link ──────────────────────────────────────────
@@ -812,7 +814,7 @@ def delete_item(item_id: str, authorization: str = Header(None)):
     # Ownership check — only the item owner can delete it, and it must be active.
     rows = (
         supabase.table('plaid_items')
-        .select('id, plaid_item_id, access_token, plaid_client_id')
+        .select('id, plaid_item_id, access_token, plaid_client_id, user_id')
         .eq('id', item_id)
         .eq('user_id', user_id)
         .eq('is_active', True)
@@ -1190,11 +1192,11 @@ def _webhook_plaid_for_item(item_id: str):
     so a JWT signed under a different account can never verify."""
     if item_id:
         rows = get_supabase().table('plaid_items') \
-            .select('plaid_client_id') \
+            .select('plaid_client_id, user_id') \
             .eq('plaid_item_id', item_id).limit(1).execute().data
         client_id = rows[0].get('plaid_client_id') if rows else None
         if client_id:
-            creds = credentials_for_client_id(get_supabase(), client_id)
+            creds = credentials_for_client_id(get_supabase(), client_id, rows[0].get('user_id'))
             if creds:
                 return get_plaid_for_creds(creds), client_id
     # Unknown item or no per-item credentials: legacy house account, if any.

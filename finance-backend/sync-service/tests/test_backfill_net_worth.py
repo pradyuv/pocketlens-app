@@ -39,21 +39,23 @@ def _seed():
             {"id": "a-brk", "user_id": USER, "name": "Brokerage", "type": "investment", "is_active": True},
         ],
         "transactions": [
-            {"account_id": "a-check", "date": "2026-07-01", "amount": -500, "pending": False},
-            {"account_id": "a-check", "date": "2026-07-02", "amount": 100, "pending": False},
-            {"account_id": "a-card", "date": "2026-07-02", "amount": 300, "pending": False},
+            {"user_id": USER, "account_id": "a-check", "date": "2026-07-01", "amount": -500, "pending": False},
+            {"user_id": USER, "account_id": "a-check", "date": "2026-07-02", "amount": 100, "pending": False},
+            {"user_id": "another-user", "account_id": "a-check", "date": "2026-07-02", "amount": 999999, "pending": False},
+            {"user_id": USER, "account_id": "a-card", "date": "2026-07-02", "amount": 300, "pending": False},
             # A pending row must not move the reconstruction (excluded, like current_balance).
-            {"account_id": "a-check", "date": "2026-07-02", "amount": 9999, "pending": True},
+            {"user_id": USER, "account_id": "a-check", "date": "2026-07-02", "amount": 9999, "pending": True},
             # Investment txns are ignored (account held flat).
-            {"account_id": "a-brk", "date": "2026-07-02", "amount": 400, "pending": False},
+            {"user_id": USER, "account_id": "a-brk", "date": "2026-07-02", "amount": 400, "pending": False},
         ],
         "separate_accounts": [
             {"id": "s-invest", "user_id": USER, "type": "investment", "is_active": True},
         ],
         "separate_account_values": [
-            {"separate_account_id": "s-invest", "date": "2026-01-01", "amount": 500},
-            {"separate_account_id": "s-invest", "date": "2026-06-30", "amount": 4000},
-            {"separate_account_id": "s-invest", "date": "2026-07-02", "amount": 1000},
+            {"user_id": USER, "separate_account_id": "s-invest", "date": "2026-01-01", "amount": 500},
+            {"user_id": USER, "separate_account_id": "s-invest", "date": "2026-06-30", "amount": 4000},
+            {"user_id": USER, "separate_account_id": "s-invest", "date": "2026-07-02", "amount": 1000},
+            {"user_id": "another-user", "separate_account_id": "s-invest", "date": "2026-07-02", "amount": 999999},
         ],
         "net_worth_snapshots": [],
     })

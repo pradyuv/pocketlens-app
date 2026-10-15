@@ -1,0 +1,12 @@
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p8
+node_modules/
+dist/
+coverage/
+test-results/
+playwright-report/
+.git/

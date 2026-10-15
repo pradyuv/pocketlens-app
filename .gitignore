@@ -18,6 +18,7 @@ venv/
 
 # Secrets / environment (never commit real credentials)
 .env
+.env.*
 !.env.example
 
 # APNs auth keys — the .p8 private key is provided via env var (Render dashboard),

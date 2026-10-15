@@ -107,13 +107,14 @@ def _fold(daily_balance, liability, assets, liabilities, days):
         bucket[d] += max(daily_balance[d], Decimal(0))
 
 
-def _transaction_deltas(supabase, account_id, start):
+def _transaction_deltas(supabase, account_id, start, user_id):
     """Posted transactions for an account within the window, summed per day.
 
     Pending rows are excluded to match Plaid's `current_balance` (posted only)."""
     rows = supabase.table('transactions') \
         .select('date, amount') \
         .eq('account_id', account_id) \
+        .eq('user_id', user_id) \
         .eq('pending', False) \
         .gte('date', start.isoformat()) \
         .execute().data
@@ -154,7 +155,7 @@ def reconstruct_history(supabase, user_id, days, today):
         liability = is_liability(acct['type'])
         sign = Decimal(-1) if liability else Decimal(1)
         if acct['type'] in RECONSTRUCTABLE_TYPES:
-            deltas = _transaction_deltas(supabase, acct['id'], start)
+            deltas = _transaction_deltas(supabase, acct['id'], start, user_id)
         else:
             deltas = {}                # held flat at current balance
             flagged.append((acct.get('name') or acct['id'], acct['type']))
@@ -168,6 +169,7 @@ def reconstruct_history(supabase, user_id, days, today):
     for acct in sep_accounts:
         values = supabase.table('separate_account_values') \
             .select('date, amount') \
+            .eq('user_id', user_id) \
             .eq('separate_account_id', acct['id']).execute().data
         daily = _separate_daily_balance(values, day_list)
         _fold(daily, is_liability(acct['type']), assets, liabilities, day_list)

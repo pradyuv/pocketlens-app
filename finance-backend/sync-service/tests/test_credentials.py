@@ -93,7 +93,8 @@ def _client_id_of(client):
 def test_get_plaid_for_item_routes_by_items_client_id():
     db = FakeSupabase(tables={"plaid_credentials": [_creds_row()]})
 
-    byo_item = {"plaid_item_id": "it-1", "plaid_client_id": "user-client-id"}
+    byo_item = {"plaid_item_id": "it-1", "plaid_client_id": "user-client-id",
+                "user_id": USER}
     assert _client_id_of(plaid_client.get_plaid_for_item(db, byo_item)) == "user-client-id"
 
     # null client_id = pre-migration item on the house account
@@ -106,6 +107,28 @@ def test_get_plaid_for_item_raises_when_credentials_gone():
     orphan = {"plaid_item_id": "it-3", "plaid_client_id": "deleted-client-id"}
     with pytest.raises(RuntimeError, match="deleted-client-id"):
         plaid_client.get_plaid_for_item(db, orphan)
+
+
+def test_client_cache_does_not_reuse_a_different_secret():
+    good = {'plaid_client_id': 'shared-id', 'env': 'production', 'secret': 'correct'}
+    wrong = {**good, 'secret': 'incorrect'}
+    good_client = plaid_client.get_plaid_for_creds(good)
+    wrong_client = plaid_client.get_plaid_for_creds(wrong)
+    assert good_client is not wrong_client
+    assert wrong_client.api_client.configuration.api_key['secret'] == 'incorrect'
+
+
+def test_item_uses_its_owners_secret_when_client_ids_collide():
+    other_user = '00000000-0000-0000-0000-000000000002'
+    db = FakeSupabase(tables={'plaid_credentials': [
+        _creds_row(secret='other-secret', user_id=other_user, id='cred-other'),
+        _creds_row(secret='owner-secret'),
+    ]})
+    client = plaid_client.get_plaid_for_item(db, {
+        'plaid_item_id': 'item-owner', 'plaid_client_id': 'user-client-id',
+        'user_id': USER,
+    })
+    assert client.api_client.configuration.api_key['secret'] == 'owner-secret'
 
 
 # ── 3. Item cap counting ────────────────────────────────────────────────────
@@ -173,14 +196,14 @@ def test_db_row_wins_over_env_for_same_client_id():
     db = FakeSupabase(tables={
         "plaid_credentials": [_creds_row(client_id=HOUSE_CLIENT, secret="db-secret")],
     })
-    creds = plaid_client.credentials_for_client_id(db, HOUSE_CLIENT)
+    creds = plaid_client.credentials_for_client_id(db, HOUSE_CLIENT, USER)
     assert creds["source"] == "user"
     assert creds["secret"] == "db-secret"
 
 
 def test_client_id_falls_back_to_env_house_when_no_row():
     db = FakeSupabase(tables={"plaid_credentials": []})
-    creds = plaid_client.credentials_for_client_id(db, HOUSE_CLIENT)
+    creds = plaid_client.credentials_for_client_id(db, HOUSE_CLIENT, USER)
     assert creds["source"] == "house"
 
 

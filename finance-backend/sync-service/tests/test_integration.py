@@ -121,6 +121,59 @@ def test_rls_user_isolation(make_user):
     assert b.table("accounts").select("id").eq("id", b_acct).execute().data, "B's row must survive A's delete"
 
 
+def test_rls_rejects_cross_user_references(make_user):
+    _, a = make_user()
+    _, b = make_user()
+    own_category = a.table('categories').insert({'name': 'Own parent'}).execute().data[0]['id']
+    foreign_category = b.table('categories').insert({'name': 'Private parent'}).execute().data[0]['id']
+    a.table('categories').insert({'name': 'Valid child', 'parent_id': own_category}).execute()
+    with pytest.raises(Exception):
+        a.table('categories').insert({'name': 'Invalid child', 'parent_id': foreign_category}).execute()
+
+    own = a.table('separate_accounts').insert({'name': 'Own account'}).execute().data[0]['id']
+    victim = b.table('separate_accounts').insert({'name': 'Private account'}).execute().data[0]['id']
+
+    # The parent UUID may be known even though RLS hides the parent row.
+    with pytest.raises(Exception):
+        a.table('separate_account_values').insert({
+            'separate_account_id': victim, 'date': '2026-01-01', 'amount': 999999,
+        }).execute()
+    assert b.table('separate_account_values').select('id').execute().data == []
+
+    a.table('separate_account_values').insert({
+        'separate_account_id': own, 'date': '2026-01-01', 'amount': 10,
+    }).execute()
+    assert len(a.table('separate_account_values').select('id').execute().data) == 1
+
+
+def test_existing_cross_owner_rows_do_not_change_net_worth(make_user, service):
+    attacker_id, _ = make_user()
+    owner_id, owner = make_user()
+    manual = owner.table('separate_accounts').insert({
+        'name': 'Savings', 'type': 'depository',
+    }).execute().data[0]['id']
+    checking = _account(owner)
+    owner.table('account_balance_history').insert({
+        'account_id': checking, 'date': '2026-01-01', 'current_balance': 100,
+    }).execute()
+
+    # Model legacy/corrupt rows written by a privileged job before the policy.
+    service.table('separate_account_values').insert({
+        'user_id': attacker_id, 'separate_account_id': manual,
+        'date': '2026-01-02', 'amount': 999999,
+    }).execute()
+    service.table('account_balance_history').insert({
+        'user_id': attacker_id, 'account_id': checking,
+        'date': '2026-01-02', 'current_balance': 999999,
+    }).execute()
+
+    latest = service.table('latest_balances').select('current_balance') \
+        .eq('user_id', owner_id).eq('account_id', checking).single().execute().data
+    assert float(latest['current_balance']) == 100
+    current = owner.table('current_net_worth').select('net_worth').single().execute().data
+    assert float(current['net_worth']) == 100
+
+
 # ── 2. Signup trigger seeds default categories ───────────────────────────────
 def test_signup_trigger_seeds_categories(make_user):
     _uid, client = make_user()

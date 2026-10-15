@@ -161,7 +161,7 @@ class _RaisingClient:
 
 
 def test_probe_maps_plaid_error_body(monkeypatch):
-    monkeypatch.setattr(api, "get_plaid_for_creds", lambda creds: _RaisingClient(
+    monkeypatch.setattr(api, "new_plaid_client", lambda creds: _RaisingClient(
         json.dumps({"error_code": "INVALID_API_KEYS",
                     "error_message": "invalid client_id or secret provided"})))
     code, message = api._probe(CLIENT_ID, PROD_SECRET, "production")
@@ -170,7 +170,7 @@ def test_probe_maps_plaid_error_body(monkeypatch):
 
 
 def test_probe_unparseable_error_is_unknown(monkeypatch):
-    monkeypatch.setattr(api, "get_plaid_for_creds",
+    monkeypatch.setattr(api, "new_plaid_client",
                         lambda creds: _RaisingClient("<html>gateway error</html>"))
     assert api._probe(CLIENT_ID, PROD_SECRET, "production") == ("UNKNOWN", "")
 
@@ -180,8 +180,58 @@ def test_probe_success_returns_none(monkeypatch):
         def institutions_get(self, req):
             return {"institutions": []}
 
-    monkeypatch.setattr(api, "get_plaid_for_creds", lambda creds: OkClient())
+    monkeypatch.setattr(api, "new_plaid_client", lambda creds: OkClient())
     assert api._probe(CLIENT_ID, PROD_SECRET, "production") is None
+
+
+def test_probe_does_not_accept_a_warm_clients_secret(monkeypatch):
+    class FakeClient:
+        def __init__(self, secret):
+            self.secret = secret
+
+        def institutions_get(self, _request):
+            if self.secret != PROD_SECRET:
+                error = plaid.ApiException(status=400)
+                error.body = json.dumps({'error_code': 'INVALID_API_KEYS'})
+                raise error
+
+    monkeypatch.setattr(plaid_client, 'new_plaid_client',
+                        lambda creds: FakeClient(creds['secret']))
+    monkeypatch.setattr(api, 'new_plaid_client',
+                        lambda creds: FakeClient(creds['secret']))
+    plaid_client.get_plaid_for_creds({
+        'plaid_client_id': CLIENT_ID, 'env': 'production', 'secret': PROD_SECRET,
+    })
+    assert api._probe(CLIENT_ID, SANDBOX_SECRET, 'production')[0] == 'INVALID_API_KEYS'
+
+
+def test_failed_reconnect_preserves_bank_and_transactions(monkeypatch):
+    item_id = '00000000-0000-0000-0000-000000000010'
+    db = FakeSupabase(tables={
+        'plaid_items': [{
+            'id': item_id, 'user_id': USER, 'plaid_client_id': CLIENT_ID,
+            'access_token': vault.encrypt('access-original'), 'is_active': True,
+        }],
+        'accounts': [{'id': 'account-1', 'plaid_item_id': item_id}],
+        'transactions': [{'id': 'txn-1', 'account_id': 'account-1'}],
+    })
+    monkeypatch.setattr(api, 'get_supabase', lambda: db)
+    monkeypatch.setattr(api, '_user_id_from_token', lambda _token: USER)
+    monkeypatch.setattr(api, 'credentials_for_user', lambda *_args: {
+        'plaid_client_id': CLIENT_ID, 'secret': PROD_SECRET, 'env': 'production',
+    })
+
+    class OutageClient:
+        def link_token_create(self, _request):
+            raise RuntimeError('temporary Plaid outage')
+
+    monkeypatch.setattr(api, 'get_plaid_for_creds', lambda _creds: OutageClient())
+    with pytest.raises(HTTPException) as exc:
+        api.link_prepare(authorization='Bearer token', payload={'item_id': item_id})
+    assert exc.value.status_code == 502
+    assert db.one('plaid_items', id=item_id)['is_active'] is True
+    assert db.one('accounts', id='account-1') is not None
+    assert db.one('transactions', id='txn-1') is not None
 
 
 # ── 4. Wizard + link pages ───────────────────────────────────────────────────
